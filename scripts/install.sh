@@ -41,8 +41,25 @@ if [[ -z "${api_key}" ]]; then
   exit 1
 fi
 
-read -rp "Model [${default_model}]: " model
-model="${model:-$default_model}"
+echo
+echo "Select model:"
+select model in "MiniMax-M2.7-highspeed" "MiniMax-M2.7" "Custom"; do
+  case "${model}" in
+    "Custom")
+      read -rp "Enter custom model name: " custom_model
+      if [[ -z "${custom_model}" ]]; then
+        echo "Model name cannot be empty." >&2
+        exit 1
+      fi
+      model="${custom_model}"
+      ;;
+    "")
+      echo "Invalid selection." >&2
+      exit 1
+      ;;
+  esac
+  break
+done
 
 read -rp "MiniMax Anthropic base URL [${default_target}]: " target_base_url
 target_base_url="${target_base_url:-$default_target}"
