@@ -49,7 +49,8 @@ API Key 只会写入本机 `~/.claude/settings.json`，不会进入仓库。
 - 安装 shim 到 `~/.claude/system-user-shim`
 - 写入 macOS 用户级 LaunchAgent
 - 将 Claude Code 的 `ANTHROPIC_BASE_URL` 设置为 `http://127.0.0.1:17861`
-- 添加一个 `SessionStart` hook，只负责确保 shim 服务已启动，不注入任何 prompt
+
+安装器不会添加 Claude Code hook，也不会注入 prompt。它只改 API base URL，让 Claude Code 的请求经过本机代理。
 
 健康检查：
 

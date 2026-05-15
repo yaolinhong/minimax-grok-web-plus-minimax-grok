@@ -55,8 +55,7 @@ model_pattern="${model_pattern:-$default_pattern}"
 
 mkdir -p "${install_dir}" "${launch_agents_dir}" "${HOME}/.claude/logs"
 cp "${repo_root}/server.mjs" "${install_dir}/server.mjs"
-cp "${repo_root}/scripts/ensure.sh" "${install_dir}/ensure.sh"
-chmod +x "${install_dir}/server.mjs" "${install_dir}/ensure.sh"
+chmod +x "${install_dir}/server.mjs"
 
 node_path="$(command -v node)"
 
@@ -107,7 +106,6 @@ export SHIM_MODEL="${model}"
 export SHIM_TARGET_BASE_URL="${target_base_url}"
 export SHIM_PORT="${port}"
 export SHIM_MODEL_PATTERN="${model_pattern}"
-export SHIM_ENSURE_COMMAND="${install_dir}/ensure.sh"
 export SHIM_LABEL="${label}"
 export SHIM_PLIST="${plist_file}"
 
@@ -150,25 +148,6 @@ if (!settings.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) {
   settings.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
 }
 
-settings.hooks = settings.hooks && typeof settings.hooks === "object" ? settings.hooks : {};
-const sessionStart = Array.isArray(settings.hooks.SessionStart) ? settings.hooks.SessionStart : [];
-const ensureCommand = process.env.SHIM_ENSURE_COMMAND;
-const filtered = sessionStart.filter((entry) => {
-  const hooks = Array.isArray(entry?.hooks) ? entry.hooks : [];
-  return !hooks.some((hook) => String(hook?.command || "").includes("system-user-shim/ensure.sh"));
-});
-filtered.push({
-  matcher: "startup|resume|clear|compact",
-  hooks: [
-    {
-      type: "command",
-      command: ensureCommand,
-      timeout: 10,
-    },
-  ],
-});
-settings.hooks.SessionStart = filtered;
-
 fs.writeFileSync(settingsFile, `${JSON.stringify(settings, null, 2)}\n`);
 fs.writeFileSync(
   stateFile,
@@ -194,7 +173,17 @@ NODE
 /bin/launchctl bootstrap "gui/$UID" "${plist_file}" >/dev/null 2>&1 || true
 /bin/launchctl kickstart -k "gui/$UID/${label}" >/dev/null 2>&1 || true
 
-"${install_dir}/ensure.sh"
+for _ in {1..30}; do
+  if /usr/bin/curl -fsS "http://127.0.0.1:${port}/__health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+done
+
+if ! /usr/bin/curl -fsS "http://127.0.0.1:${port}/__health" >/dev/null 2>&1; then
+  echo "system-user-shim failed to start on port ${port}" >&2
+  exit 1
+fi
 
 echo
 echo "Installed."

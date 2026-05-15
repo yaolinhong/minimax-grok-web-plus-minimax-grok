@@ -56,6 +56,7 @@ function copyHeaders(headers, bodyLength) {
   delete result.host;
   delete result["content-length"];
   delete result.connection;
+  delete result["accept-encoding"];
   if (bodyLength !== undefined) {
     result["content-length"] = String(bodyLength);
   }
