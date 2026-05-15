@@ -72,7 +72,33 @@ function Get-NssmCommand {
     $command = Get-Command nssm -ErrorAction SilentlyContinue
   }
   if (-not $command) {
-    Fail 'nssm.exe was not found in PATH. Install NSSM from https://nssm.cc/download and ensure nssm.exe is available in PATH before rerunning this script.'
+    Write-Info 'nssm not found. Downloading...'
+    $nssmDir = Join-Path $env:TEMP 'nssm-temp'
+    $nssmZip = Join-Path $nssmDir 'nssm.zip'
+    $nssmExe = Join-Path $nssmDir 'nssm.exe'
+
+    New-Item -ItemType Directory -Path $nssmDir -Force | Out-Null
+
+    $url = 'https://github.com/ArbitraryRider/nssm-builds/raw/master/2019-07-19/nssm-3.0.0.0.zip'
+    try {
+      Invoke-WebRequest -Uri $url -OutFile $nssmZip -UseBasicParsing
+    } catch {
+      try {
+        $url = 'https://nchc.dl.sourceforge.net/project/nssm/nssm/nssm-3.0.0.0/nssm-3.0.0.0.zip'
+        Invoke-WebRequest -Uri $url -OutFile $nssmZip -UseBasicParsing
+      } catch {
+        Fail ('Failed to download nssm. Please install NSSM manually from https://nssm.cc/download and ensure nssm.exe is available in PATH.')
+      }
+    }
+
+    Expand-Archive -Path $nssmZip -DestinationPath $nssmDir -Force
+    $found = Get-ChildItem -Path $nssmDir -Filter 'nssm.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $found) {
+      Fail 'nssm.exe not found in downloaded archive.'
+    }
+    Copy-Item -LiteralPath $found.FullName -Destination $env:TEMP -Force
+    $env:PATH = $env:PATH + ';' + $env:TEMP
+    return Join-Path $env:TEMP 'nssm.exe'
   }
   return $command.Source
 }

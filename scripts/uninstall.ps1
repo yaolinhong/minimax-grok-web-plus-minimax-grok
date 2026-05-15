@@ -187,16 +187,17 @@ if ($nssmCommand) {
 
 if ($nssmPath) {
   & $nssmPath stop $serviceName | Out-Null
-}
-
-try {
-  Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-} catch {
+} else {
+  try {
+    Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
+  } catch {
+  }
 }
 
 if ($nssmPath) {
   & $nssmPath remove $serviceName confirm | Out-Null
 }
+
 if (Test-ServiceExists -ServiceName $serviceName) {
   & sc.exe delete $serviceName | Out-Null
 }
