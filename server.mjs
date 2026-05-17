@@ -19,6 +19,16 @@ const unsupportedTopLevelKeys = [
   "service_tier",
   "thinking",
 ];
+const stopHookJsonInstruction = [
+  "You are evaluating whether a Claude Code stop condition is satisfied.",
+  "Use only the transcript evidence provided below.",
+  "Do not explain your reasoning before the JSON.",
+  "Return exactly one JSON object and no other text.",
+  "Schema: {\"ok\": boolean, \"reason\": string}",
+  "Keep reason concise, under 80 words.",
+  "Use ok=true only when the evidence shows the condition has already been satisfied.",
+  "Use ok=false when the evidence is missing, ambiguous, or only says work will start.",
+].join("\n");
 
 if (!targetBaseUrl) {
   console.error("SYSTEM_USER_SHIM_TARGET_BASE_URL is required");
@@ -263,22 +273,48 @@ function extractStopHookEvaluatorParts(body) {
   };
 }
 
+function truncateMiddle(text, maxLength) {
+  const value = String(text || "");
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  const headLength = Math.floor(maxLength * 0.35);
+  const tailLength = maxLength - headLength;
+  return `${value.slice(0, headLength)}\n\n...[truncated ${value.length - maxLength} chars]...\n\n${value.slice(-tailLength)}`;
+}
+
+function compactTranscriptEvidence(evidenceText) {
+  const text = String(evidenceText || "");
+  const lines = text.split("\n");
+  const importantPattern =
+    /goal|condition|完成|最终|证据|交付|需求|状态|已创建|已实现|已包含|已集成|已验证|可运行|正常工作|clean|nothing to commit|working tree|git |commit|README|readme|src\/|examples\/|package\.json|\.gitignore|skill|技术博客写作|git-commit|tool_use|tool_result|Bash|Write|Update|Read|mkdir|npm|publish|自动化|公众号|微信|仓库|脚本|CLI|api\.js|cli\.js/i;
+  const important = lines.filter((line) => importantPattern.test(line));
+  const head = lines.slice(0, 40);
+  const tail = lines.slice(-180);
+  const joined = [...head, "", "[important transcript lines]", ...important.slice(-260), "", "[recent transcript tail]", ...tail].join("\n");
+  return truncateMiddle(joined, 12000);
+}
+
 function compactStopHookEvaluatorRequest(body) {
-  const { condition, lastAssistantMessage, rawText } = extractStopHookEvaluatorParts(body);
-  const evidence = lastAssistantMessage || rawText.slice(-4000);
+  const { condition, lastAssistantMessage, evidenceText } = extractStopHookEvaluatorParts(body);
+  const evidence = compactTranscriptEvidence(evidenceText || lastAssistantMessage);
   const prompt = [
-    "Decide whether the stopping condition is satisfied.",
+    stopHookJsonInstruction,
     "",
     `Condition: ${condition || "(missing)"}`,
     "",
-    "Evidence from the latest assistant response:",
+    "Last assistant message:",
+    lastAssistantMessage || "(missing)",
+    "",
+    "Conversation transcript evidence:",
     evidence,
     "",
-    "Answer exactly true or false. Do not include any other text.",
+    "Return exactly JSON now.",
   ].join("\n");
 
   const compacted = { ...body };
-  compacted.max_tokens = Math.min(Number(body.max_tokens || 16) || 16, 16);
+  compacted.max_tokens = Math.min(Math.max(Number(body.max_tokens || 1024) || 1024, 512), 2048);
   compacted.stream = false;
   compacted.temperature = 0;
   compacted.messages = [
@@ -296,88 +332,6 @@ function compactStopHookEvaluatorRequest(body) {
   delete compacted.stop_sequences;
 
   return compacted;
-}
-
-function normalizeForComparison(text) {
-  return String(text || "")
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim();
-}
-
-function extractPrintTargets(condition) {
-  const targets = new Set();
-  for (const match of String(condition || "").matchAll(/["'`]([^"'`\n]+)["'`]/g)) {
-    if (match[1]?.trim()) {
-      targets.add(match[1].trim());
-    }
-  }
-  for (const match of String(condition || "").matchAll(/(?:print|echo|打印|输出)\s+(?:exactly\s+)?([\p{L}\p{N}_.:-]+)/giu)) {
-    if (match[1]?.trim()) {
-      targets.add(match[1].trim());
-    }
-  }
-  return [...targets];
-}
-
-function countMatchingToolResults(evidenceText, targets) {
-  const resultLines = String(evidenceText || "")
-    .split("\n")
-    .filter((line) => /\btool_result:/i.test(line));
-  return resultLines.filter((line) => targets.some((target) => normalizeForComparison(line).includes(normalizeForComparison(target)))).length;
-}
-
-function hasToolCompletionEvidence(condition, evidenceText) {
-  const normalizedCondition = normalizeForComparison(condition);
-  const normalizedEvidence = normalizeForComparison(evidenceText);
-  const asksForTool = /\b(tool|bash|shell|command)\b|工具|命令/.test(normalizedCondition);
-  if (!asksForTool) {
-    return false;
-  }
-
-  const asksForBash = /\bbash\b/.test(normalizedCondition);
-  const hasRequestedToolUse = asksForBash ? /\btool use bash\b/.test(normalizedEvidence) : /\btool use\b/.test(normalizedEvidence);
-  if (!hasRequestedToolUse) {
-    return false;
-  }
-
-  const targets = extractPrintTargets(condition);
-  if (targets.length === 0) {
-    return true;
-  }
-
-  const hasTargetResult = targets.some((target) => normalizeForComparison(evidenceText).includes(normalizeForComparison(target))) && /\btool result\b/.test(normalizedEvidence);
-  if (!hasTargetResult) {
-    return false;
-  }
-
-  if (/\bexactly once\b|恰好一次|只.*一次/.test(String(condition || "").toLowerCase())) {
-    return countMatchingToolResults(evidenceText, targets) === 1;
-  }
-
-  return true;
-}
-
-function judgeStopHookEvaluator(body) {
-  const { condition, lastAssistantMessage, evidenceText } = extractStopHookEvaluatorParts(body);
-  const normalizedCondition = normalizeForComparison(condition);
-  const normalizedMessage = normalizeForComparison(lastAssistantMessage);
-  const combinedEvidence = [lastAssistantMessage, evidenceText].filter(Boolean).join("\n");
-  const normalizedCombinedEvidence = normalizeForComparison(combinedEvidence);
-  const met = Boolean(
-    normalizedCondition &&
-      combinedEvidence &&
-      (normalizedMessage.includes(normalizedCondition) ||
-        hasToolCompletionEvidence(condition, evidenceText) ||
-        (normalizedCondition === "sayhi" && /\b(hi|hello|hey)\b|你好/.test(normalizedCombinedEvidence))),
-  );
-
-  return {
-    ok: met,
-    reason: met
-      ? `The latest assistant response satisfies the stopping condition: ${condition || "condition met"}.`
-      : `The latest assistant response does not yet provide enough evidence for: ${condition || "the stopping condition"}.`,
-  };
 }
 
 function createAnthropicMessage(model, text) {
@@ -417,6 +371,81 @@ function writeAnthropicMessage(res, body, text) {
 
   res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(message));
+}
+
+function extractTextFromAnthropicMessage(message) {
+  if (!message || typeof message !== "object" || !Array.isArray(message.content)) {
+    return "";
+  }
+  return message.content
+    .map((block) => (block?.type === "text" && typeof block.text === "string" ? block.text : ""))
+    .join("");
+}
+
+function extractJsonObjectText(text) {
+  const value = String(text || "").trim();
+  const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) {
+    return extractJsonObjectText(fenced[1]);
+  }
+
+  const start = value.indexOf("{");
+  const end = value.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    return value.slice(start, end + 1);
+  }
+
+  return value;
+}
+
+function normalizeEvaluatorPayload(text) {
+  const raw = String(text || "").trim();
+  const jsonText = extractJsonObjectText(raw);
+  try {
+    const parsed = JSON.parse(jsonText);
+    if (typeof parsed?.ok === "boolean") {
+      return {
+        ok: parsed.ok,
+        reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : (parsed.ok ? "The condition is satisfied." : "The condition is not satisfied."),
+      };
+    }
+  } catch {}
+
+  if (/^\s*true\s*$/i.test(raw)) {
+    return { ok: true, reason: "The evaluator returned true." };
+  }
+  if (/^\s*false\s*$/i.test(raw)) {
+    return { ok: false, reason: "The evaluator returned false." };
+  }
+
+  return {
+    ok: false,
+    reason: `Evaluator did not return valid JSON: ${raw.slice(0, 300) || "(empty response)"}`,
+  };
+}
+
+function normalizeEvaluatorMessageBody(rawBody) {
+  const parsed = JSON.parse(rawBody.toString("utf8"));
+  const text = extractTextFromAnthropicMessage(parsed);
+  const normalized = normalizeEvaluatorPayload(text);
+  return Buffer.from(JSON.stringify({ ...parsed, content: [{ type: "text", text: JSON.stringify(normalized) }] }), "utf8");
+}
+
+function proxyResponse(upstreamRes, res, responseBody, normalizeEvaluatorResponse) {
+  if (!normalizeEvaluatorResponse || !String(upstreamRes.headers["content-type"] || "").includes("application/json")) {
+    res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+    res.end(responseBody);
+    return;
+  }
+
+  try {
+    const normalizedBody = normalizeEvaluatorMessageBody(responseBody);
+    res.writeHead(upstreamRes.statusCode || 502, copyHeaders(upstreamRes.headers, normalizedBody.length));
+    res.end(normalizedBody);
+  } catch {
+    res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+    res.end(responseBody);
+  }
 }
 
 function logRequestSummary(body, rewritten) {
@@ -541,6 +570,7 @@ function copyHeaders(headers, bodyLength) {
   delete result["content-length"];
   delete result.connection;
   delete result["accept-encoding"];
+  delete result["transfer-encoding"];
   if (bodyLength !== undefined) {
     result["content-length"] = String(bodyLength);
   }
@@ -557,18 +587,17 @@ const server = http.createServer(async (req, res) => {
 
     const rawBody = await readRequest(req);
     let bodyBuffer = rawBody;
+    let normalizeEvaluatorResponse = false;
 
     if (req.method !== "GET" && rawBody.length > 0) {
       const contentType = String(req.headers["content-type"] || "");
       if (contentType.includes("application/json")) {
         const parsed = JSON.parse(rawBody.toString("utf8"));
-        if (isStopHookEvaluatorRequest(parsed)) {
-          writeAnthropicMessage(res, parsed, JSON.stringify(judgeStopHookEvaluator(parsed)));
-          return;
-        }
+        const isStopHookEvaluator = isStopHookEvaluatorRequest(parsed);
         const sanitized = sanitizeRequestBody(parsed);
         const rewritten = convertSystemToUser(sanitized);
         logRequestSummary(parsed, rewritten);
+        normalizeEvaluatorResponse = isStopHookEvaluator;
         bodyBuffer = Buffer.from(JSON.stringify(rewritten), "utf8");
       }
     }
@@ -585,8 +614,15 @@ const server = http.createServer(async (req, res) => {
         headers: copyHeaders(req.headers, bodyBuffer.length),
       },
       (upstreamRes) => {
-        res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
-        upstreamRes.pipe(res);
+        if (!normalizeEvaluatorResponse) {
+          res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+          upstreamRes.pipe(res);
+          return;
+        }
+
+        const chunks = [];
+        upstreamRes.on("data", (chunk) => chunks.push(chunk));
+        upstreamRes.on("end", () => proxyResponse(upstreamRes, res, Buffer.concat(chunks), normalizeEvaluatorResponse));
       },
     );
 
