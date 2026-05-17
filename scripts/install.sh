@@ -30,7 +30,7 @@ default_model="MiniMax-M2.7-highspeed"
 default_target="https://api.minimaxi.com/anthropic"
 default_port="17861"
 default_pattern="minimax"
-default_preserve_system="goal evaluator,goal condition,return exactly true or false,respond with only true or false"
+default_preserve_system=""
 default_routes="minimax=https://api.minimaxi.com/anthropic"
 
 echo "Claude Code System-User Shim installer"
@@ -72,7 +72,7 @@ port="${port:-$default_port}"
 read -rp "Model match pattern [${default_pattern}]: " model_pattern
 model_pattern="${model_pattern:-$default_pattern}"
 
-read -rp "Preserve system patterns [${default_preserve_system}]: " preserve_system
+read -rp "Preserve system patterns (optional) [none]: " preserve_system
 preserve_system="${preserve_system:-$default_preserve_system}"
 
 read -rp "Model routes [${default_routes}]: " shim_routes

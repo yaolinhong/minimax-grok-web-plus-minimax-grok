@@ -6,18 +6,11 @@ import { URL } from "node:url";
 const port = Number(process.env.SYSTEM_USER_SHIM_PORT || 17861);
 const targetBaseUrl = process.env.SYSTEM_USER_SHIM_TARGET_BASE_URL;
 const modelPattern = new RegExp(process.env.SYSTEM_USER_SHIM_MODEL_PATTERN || "minimax", "i");
-const preserveSystemPatterns = (process.env.SYSTEM_USER_SHIM_PRESERVE_SYSTEM || "").split(",").filter(Boolean).map((p) => new RegExp(p.trim(), "i"));
-const goalHintPatterns = [
-  /goal/i,
-  /goal evaluator/i,
-  /goal condition/i,
-  /stopping condition/i,
-  /hook_event_name["']?\s*:\s*["']?Stop/i,
-  /last_assistant_message/i,
-  /return exactly ['"]?true['"]? or ['"]?false['"]?/i,
-  /respond with only ['"]?true['"]? or ['"]?false['"]?/i,
-  /only ['"]?true['"]? or ['"]?false['"]?/i,
-];
+const preserveSystemPatterns = (process.env.SYSTEM_USER_SHIM_PRESERVE_SYSTEM || "")
+  .split(",")
+  .map((pattern) => pattern.trim())
+  .filter(Boolean)
+  .map((pattern) => new RegExp(pattern, "i"));
 const unsupportedTopLevelKeys = [
   "container",
   "context_management",
@@ -40,6 +33,14 @@ function normalizeContent(content) {
   return [{ type: "text", text: String(content) }];
 }
 
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function flattenContentToText(content) {
   if (typeof content === "string") {
     return content;
@@ -55,6 +56,13 @@ function flattenContentToText(content) {
       }
       if (block?.type === "text" && typeof block.text === "string") {
         return block.text;
+      }
+      if (block?.type === "tool_use") {
+        return [`tool_use: ${String(block.name || "")}`, `input: ${safeStringify(block.input || {})}`].join("\n");
+      }
+      if (block?.type === "tool_result") {
+        const resultText = flattenContentToText(block.content);
+        return [`tool_result: ${resultText}`, block.is_error === true ? "is_error: true" : ""].filter(Boolean).join("\n");
       }
       return "";
     })
@@ -81,7 +89,7 @@ function matchesPatterns(text, patterns) {
 function shouldPreserveSystem(body) {
   const systemText = flattenContentToText(body?.system).trim();
   if (!systemText) return false;
-  return matchesPatterns(systemText, preserveSystemPatterns) || matchesPatterns(systemText, goalHintPatterns);
+  return matchesPatterns(systemText, preserveSystemPatterns);
 }
 
 function sanitizeContent(content) {
@@ -178,16 +186,6 @@ function sanitizeTool(tool) {
   return sanitized;
 }
 
-function isGoalRelatedRequest(body) {
-  const systemText = flattenContentToText(body?.system).trim();
-  if (systemText && matchesPatterns(systemText, goalHintPatterns)) {
-    return true;
-  }
-
-  const messages = Array.isArray(body?.messages) ? body.messages : [];
-  return messages.some((message) => matchesPatterns(flattenContentToText(message?.content), goalHintPatterns));
-}
-
 function isStopHookEvaluatorRequest(body) {
   const systemText = flattenContentToText(body?.system);
   const messagesText = flattenMessagesToText(body?.messages);
@@ -247,13 +245,20 @@ function extractJsonObjectAfterMarker(text, marker) {
 }
 
 function extractStopHookEvaluatorParts(body) {
-  const text = `${flattenContentToText(body?.system)}\n${flattenMessagesToText(body?.messages)}`;
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const text = `${flattenContentToText(body?.system)}\n${flattenMessagesToText(messages)}`;
+  const hookMessageIndex = messages.findLastIndex((message) => {
+    const contentText = flattenContentToText(message?.content);
+    return /Based on the conversation transcript above, has the following stopping condition been satisfied\?/i.test(contentText) || /ARGUMENTS:\s*\{/i.test(contentText);
+  });
+  const evidenceMessages = hookMessageIndex === -1 ? messages : messages.slice(0, hookMessageIndex);
   const conditionMatches = [...text.matchAll(/^Condition:\s*([^\n]+)/gim)];
   const conditionMatch = conditionMatches.at(-1);
   const args = extractJsonObjectAfterMarker(text, "ARGUMENTS:");
   return {
     condition: String(conditionMatch?.[1] || "").trim(),
     lastAssistantMessage: typeof args?.last_assistant_message === "string" ? args.last_assistant_message : "",
+    evidenceText: flattenMessagesToText(evidenceMessages),
     rawText: text,
   };
 }
@@ -300,15 +305,71 @@ function normalizeForComparison(text) {
     .trim();
 }
 
+function extractPrintTargets(condition) {
+  const targets = new Set();
+  for (const match of String(condition || "").matchAll(/["'`]([^"'`\n]+)["'`]/g)) {
+    if (match[1]?.trim()) {
+      targets.add(match[1].trim());
+    }
+  }
+  for (const match of String(condition || "").matchAll(/(?:print|echo|打印|输出)\s+(?:exactly\s+)?([\p{L}\p{N}_.:-]+)/giu)) {
+    if (match[1]?.trim()) {
+      targets.add(match[1].trim());
+    }
+  }
+  return [...targets];
+}
+
+function countMatchingToolResults(evidenceText, targets) {
+  const resultLines = String(evidenceText || "")
+    .split("\n")
+    .filter((line) => /\btool_result:/i.test(line));
+  return resultLines.filter((line) => targets.some((target) => normalizeForComparison(line).includes(normalizeForComparison(target)))).length;
+}
+
+function hasToolCompletionEvidence(condition, evidenceText) {
+  const normalizedCondition = normalizeForComparison(condition);
+  const normalizedEvidence = normalizeForComparison(evidenceText);
+  const asksForTool = /\b(tool|bash|shell|command)\b|工具|命令/.test(normalizedCondition);
+  if (!asksForTool) {
+    return false;
+  }
+
+  const asksForBash = /\bbash\b/.test(normalizedCondition);
+  const hasRequestedToolUse = asksForBash ? /\btool use bash\b/.test(normalizedEvidence) : /\btool use\b/.test(normalizedEvidence);
+  if (!hasRequestedToolUse) {
+    return false;
+  }
+
+  const targets = extractPrintTargets(condition);
+  if (targets.length === 0) {
+    return true;
+  }
+
+  const hasTargetResult = targets.some((target) => normalizeForComparison(evidenceText).includes(normalizeForComparison(target))) && /\btool result\b/.test(normalizedEvidence);
+  if (!hasTargetResult) {
+    return false;
+  }
+
+  if (/\bexactly once\b|恰好一次|只.*一次/.test(String(condition || "").toLowerCase())) {
+    return countMatchingToolResults(evidenceText, targets) === 1;
+  }
+
+  return true;
+}
+
 function judgeStopHookEvaluator(body) {
-  const { condition, lastAssistantMessage } = extractStopHookEvaluatorParts(body);
+  const { condition, lastAssistantMessage, evidenceText } = extractStopHookEvaluatorParts(body);
   const normalizedCondition = normalizeForComparison(condition);
   const normalizedMessage = normalizeForComparison(lastAssistantMessage);
+  const combinedEvidence = [lastAssistantMessage, evidenceText].filter(Boolean).join("\n");
+  const normalizedCombinedEvidence = normalizeForComparison(combinedEvidence);
   const met = Boolean(
     normalizedCondition &&
-      normalizedMessage &&
+      combinedEvidence &&
       (normalizedMessage.includes(normalizedCondition) ||
-        (normalizedCondition === "sayhi" && /\b(hi|hello|hey)\b|你好/.test(normalizedMessage))),
+        hasToolCompletionEvidence(condition, evidenceText) ||
+        (normalizedCondition === "sayhi" && /\b(hi|hello|hey)\b|你好/.test(normalizedCombinedEvidence))),
   );
 
   return {
@@ -433,11 +494,6 @@ function sanitizeRequestBody(body) {
 
   sanitized.tool_choice = sanitizeToolChoice(body.tool_choice, sanitized.tools);
   if (sanitized.tool_choice === undefined) {
-    delete sanitized.tool_choice;
-  }
-
-  if (isGoalRelatedRequest(sanitized)) {
-    delete sanitized.tools;
     delete sanitized.tool_choice;
   }
 

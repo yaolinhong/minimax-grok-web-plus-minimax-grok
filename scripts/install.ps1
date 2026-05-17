@@ -251,7 +251,7 @@ $defaultModel = 'MiniMax-M2.7-highspeed'
 $defaultTargetUrl = 'https://api.minimaxi.com/anthropic'
 $defaultPort = '17861'
 $defaultModelPattern = 'minimax'
-$defaultPreserveSystem = 'goal evaluator,goal condition,return exactly true or false,respond with only true or false'
+$defaultPreserveSystem = ''
 $serviceName = 'ClaudeSystemUserShim'
 $displayName = 'Claude Code MiniMax Shim'
 $description = 'Routes Claude Code requests to MiniMax API with system-to-user prompt conversion'
@@ -293,10 +293,7 @@ if ([string]::IsNullOrWhiteSpace($modelPattern)) {
   Fail 'Model match pattern cannot be empty.'
 }
 
-$preserveSystem = Prompt-Value -Label 'Preserve system patterns' -DefaultValue $defaultPreserveSystem
-if ([string]::IsNullOrWhiteSpace($preserveSystem)) {
-  Fail 'Preserve system patterns cannot be empty.'
-}
+$preserveSystem = Prompt-Value -Label 'Preserve system patterns (optional)' -DefaultValue $defaultPreserveSystem
 
 $installDir = Join-Path $env:USERPROFILE '.claude\system-user-shim'
 $logDir = Join-Path $env:USERPROFILE '.claude\logs'

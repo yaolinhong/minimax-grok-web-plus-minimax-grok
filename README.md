@@ -23,7 +23,7 @@ delete body.system
 
 从当前版本开始，shim 还会做两类兼容处理：
 
-- 对 `/goal` / evaluator 风格请求保留 `system`，避免把布尔判定类 prompt 改写坏
+- 对 Claude Code 内置 `/goal` Stop hook evaluator 请求本地返回合法 JSON，避免该内部判定请求打到第三方兼容接口后触发 `400`
 - 清理部分第三方 Anthropic 兼容接口常见不支持的请求字段，减少 `400 invalid params`
 
 ## 一键安装
@@ -43,7 +43,7 @@ cd claude-system-user-shim
 - MiniMax Anthropic API 地址，默认 `https://api.minimaxi.com/anthropic`
 - 本地端口，默认 `17861`
 - 模型匹配规则，默认 `minimax`
-- 保留 `system` 的匹配规则，默认包含 `goal evaluator` / `goal condition` / `true or false`
+- 保留 `system` 的匹配规则，默认空。普通对话请求会继续把 `system` 改写进第一条 `user` 消息
 
 API Key 只会写入本机 `~/.claude/settings.json`，不会进入仓库。
 
@@ -94,4 +94,4 @@ curl http://127.0.0.1:17861/__health
 - shim 不记录请求体
 - shim 不修改非 JSON 请求
 - 默认只改写模型名匹配 `minimax` 的请求
-- 对命中 goal/evaluator 规则的请求默认保留 `system`
+- 默认不保留 `system` 字段；如需例外保留，可显式配置 `SYSTEM_USER_SHIM_PRESERVE_SYSTEM`
