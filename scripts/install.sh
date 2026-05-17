@@ -30,6 +30,8 @@ default_model="MiniMax-M2.7-highspeed"
 default_target="https://api.minimaxi.com/anthropic"
 default_port="17861"
 default_pattern="minimax"
+default_preserve_system="goal evaluator,goal condition,return exactly true or false,respond with only true or false"
+default_routes="minimax=https://api.minimaxi.com/anthropic"
 
 echo "Claude Code System-User Shim installer"
 echo
@@ -70,6 +72,12 @@ port="${port:-$default_port}"
 read -rp "Model match pattern [${default_pattern}]: " model_pattern
 model_pattern="${model_pattern:-$default_pattern}"
 
+read -rp "Preserve system patterns [${default_preserve_system}]: " preserve_system
+preserve_system="${preserve_system:-$default_preserve_system}"
+
+read -rp "Model routes [${default_routes}]: " shim_routes
+shim_routes="${shim_routes:-$default_routes}"
+
 mkdir -p "${install_dir}" "${launch_agents_dir}" "${HOME}/.claude/logs"
 cp "${repo_root}/server.mjs" "${install_dir}/server.mjs"
 chmod +x "${install_dir}/server.mjs"
@@ -99,6 +107,10 @@ cat >"${plist_file}" <<PLIST
     <string>${target_base_url}</string>
     <key>SYSTEM_USER_SHIM_MODEL_PATTERN</key>
     <string>${model_pattern}</string>
+    <key>SYSTEM_USER_SHIM_PRESERVE_SYSTEM</key>
+    <string>${preserve_system}</string>
+    <key>SYSTEM_USER_SHIM_ROUTES</key>
+    <string>${shim_routes}</string>
   </dict>
 
   <key>RunAtLoad</key>
@@ -123,6 +135,8 @@ export SHIM_MODEL="${model}"
 export SHIM_TARGET_BASE_URL="${target_base_url}"
 export SHIM_PORT="${port}"
 export SHIM_MODEL_PATTERN="${model_pattern}"
+export SHIM_PRESERVE_SYSTEM="${preserve_system}"
+export SHIM_ROUTES="${shim_routes}"
 export SHIM_LABEL="${label}"
 export SHIM_PLIST="${plist_file}"
 
@@ -151,12 +165,19 @@ Object.assign(settings.env, {
   ANTHROPIC_AUTH_TOKEN: process.env.SHIM_API_KEY,
   SYSTEM_USER_SHIM_TARGET_BASE_URL: process.env.SHIM_TARGET_BASE_URL,
   SYSTEM_USER_SHIM_MODEL_PATTERN: process.env.SHIM_MODEL_PATTERN,
+  SYSTEM_USER_SHIM_PRESERVE_SYSTEM: process.env.SHIM_PRESERVE_SYSTEM,
+  SYSTEM_USER_SHIM_ROUTES: process.env.SHIM_ROUTES,
   ANTHROPIC_MODEL: process.env.SHIM_MODEL,
-  ANTHROPIC_SMALL_FAST_MODEL: process.env.SHIM_MODEL,
   ANTHROPIC_DEFAULT_SONNET_MODEL: process.env.SHIM_MODEL,
   ANTHROPIC_DEFAULT_OPUS_MODEL: process.env.SHIM_MODEL,
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: process.env.SHIM_MODEL,
 });
+
+if (!settings.env.ANTHROPIC_SMALL_FAST_MODEL) {
+  settings.env.ANTHROPIC_SMALL_FAST_MODEL = process.env.SHIM_MODEL;
+}
+if (!settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL) {
+  settings.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = settings.env.ANTHROPIC_SMALL_FAST_MODEL;
+}
 
 if (!settings.env.API_TIMEOUT_MS) {
   settings.env.API_TIMEOUT_MS = "3000000";
@@ -178,6 +199,8 @@ fs.writeFileSync(
       port: process.env.SHIM_PORT,
       targetBaseUrl: process.env.SHIM_TARGET_BASE_URL,
       modelPattern: process.env.SHIM_MODEL_PATTERN,
+      preserveSystem: process.env.SHIM_PRESERVE_SYSTEM,
+      routes: process.env.SHIM_ROUTES,
       model: process.env.SHIM_MODEL,
     },
     null,

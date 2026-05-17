@@ -251,6 +251,7 @@ $defaultModel = 'MiniMax-M2.7-highspeed'
 $defaultTargetUrl = 'https://api.minimaxi.com/anthropic'
 $defaultPort = '17861'
 $defaultModelPattern = 'minimax'
+$defaultPreserveSystem = 'goal evaluator,goal condition,return exactly true or false,respond with only true or false'
 $serviceName = 'ClaudeSystemUserShim'
 $displayName = 'Claude Code MiniMax Shim'
 $description = 'Routes Claude Code requests to MiniMax API with system-to-user prompt conversion'
@@ -290,6 +291,11 @@ if ($port -lt 1 -or $port -gt 65535) {
 $modelPattern = Prompt-Value -Label 'Model match pattern' -DefaultValue $defaultModelPattern
 if ([string]::IsNullOrWhiteSpace($modelPattern)) {
   Fail 'Model match pattern cannot be empty.'
+}
+
+$preserveSystem = Prompt-Value -Label 'Preserve system patterns' -DefaultValue $defaultPreserveSystem
+if ([string]::IsNullOrWhiteSpace($preserveSystem)) {
+  Fail 'Preserve system patterns cannot be empty.'
 }
 
 $installDir = Join-Path $env:USERPROFILE '.claude\system-user-shim'
@@ -332,20 +338,26 @@ $envMap['ANTHROPIC_BASE_URL'] = 'http://127.0.0.1:' + $port
 $envMap['ANTHROPIC_AUTH_TOKEN'] = $apiKey
 $envMap['SYSTEM_USER_SHIM_TARGET_BASE_URL'] = $targetBaseUrl
 $envMap['SYSTEM_USER_SHIM_MODEL_PATTERN'] = $modelPattern
+$envMap['SYSTEM_USER_SHIM_PRESERVE_SYSTEM'] = $preserveSystem
 $envMap['ANTHROPIC_MODEL'] = $model
-$envMap['ANTHROPIC_SMALL_FAST_MODEL'] = $model
 $envMap['ANTHROPIC_DEFAULT_SONNET_MODEL'] = $model
 $envMap['ANTHROPIC_DEFAULT_OPUS_MODEL'] = $model
-$envMap['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = $model
+if (-not $envMap.ContainsKey('ANTHROPIC_SMALL_FAST_MODEL') -or [string]::IsNullOrWhiteSpace($envMap['ANTHROPIC_SMALL_FAST_MODEL'])) {
+  $envMap['ANTHROPIC_SMALL_FAST_MODEL'] = $model
+}
+if (-not $envMap.ContainsKey('ANTHROPIC_DEFAULT_HAIKU_MODEL') -or [string]::IsNullOrWhiteSpace($envMap['ANTHROPIC_DEFAULT_HAIKU_MODEL'])) {
+  $envMap['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = $envMap['ANTHROPIC_SMALL_FAST_MODEL']
+}
 $managedEnvKeys = @(
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_AUTH_TOKEN',
   'SYSTEM_USER_SHIM_TARGET_BASE_URL',
   'SYSTEM_USER_SHIM_MODEL_PATTERN',
+  'SYSTEM_USER_SHIM_PRESERVE_SYSTEM',
   'ANTHROPIC_MODEL',
-  'ANTHROPIC_SMALL_FAST_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_SMALL_FAST_MODEL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL'
 )
 if (-not $envMap.ContainsKey('API_TIMEOUT_MS') -or [string]::IsNullOrWhiteSpace($envMap['API_TIMEOUT_MS'])) {
@@ -394,7 +406,8 @@ if ($LASTEXITCODE -ne 0) {
 $environmentLines = @(
   'SYSTEM_USER_SHIM_PORT=' + $port,
   'SYSTEM_USER_SHIM_TARGET_BASE_URL=' + $targetBaseUrl,
-  'SYSTEM_USER_SHIM_MODEL_PATTERN=' + $modelPattern
+  'SYSTEM_USER_SHIM_MODEL_PATTERN=' + $modelPattern,
+  'SYSTEM_USER_SHIM_PRESERVE_SYSTEM=' + $preserveSystem
 )
 $parametersKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\' + $serviceName + '\Parameters'
 if (-not (Test-Path -LiteralPath $parametersKey)) {
@@ -416,6 +429,7 @@ $state = [ordered]@{
   port = $port
   targetBaseUrl = $targetBaseUrl
   modelPattern = $modelPattern
+  preserveSystem = $preserveSystem
   model = $model
   managedEnvKeys = $managedEnvKeys
 }

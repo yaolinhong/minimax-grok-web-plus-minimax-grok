@@ -21,6 +21,11 @@ delete body.system
 
 默认只对模型名匹配 `minimax` 的请求生效。
 
+从当前版本开始，shim 还会做两类兼容处理：
+
+- 对 `/goal` / evaluator 风格请求保留 `system`，避免把布尔判定类 prompt 改写坏
+- 清理部分第三方 Anthropic 兼容接口常见不支持的请求字段，减少 `400 invalid params`
+
 ## 一键安装
 
 ```bash
@@ -38,6 +43,7 @@ cd claude-system-user-shim
 - MiniMax Anthropic API 地址，默认 `https://api.minimaxi.com/anthropic`
 - 本地端口，默认 `17861`
 - 模型匹配规则，默认 `minimax`
+- 保留 `system` 的匹配规则，默认包含 `goal evaluator` / `goal condition` / `true or false`
 
 API Key 只会写入本机 `~/.claude/settings.json`，不会进入仓库。
 
@@ -49,6 +55,9 @@ API Key 只会写入本机 `~/.claude/settings.json`，不会进入仓库。
 - 安装 shim 到 `~/.claude/system-user-shim`
 - 写入 macOS 用户级 LaunchAgent
 - 将 Claude Code 的 `ANTHROPIC_BASE_URL` 设置为 `http://127.0.0.1:17861`
+
+安装器默认会把主模型写入 `ANTHROPIC_MODEL`、`ANTHROPIC_DEFAULT_SONNET_MODEL`、`ANTHROPIC_DEFAULT_OPUS_MODEL`。
+如果你已有单独配置的 `ANTHROPIC_SMALL_FAST_MODEL` 或 `ANTHROPIC_DEFAULT_HAIKU_MODEL`，安装器会保留它们，避免覆盖 `/goal` 一类更敏感的内部子流程模型。
 
 安装器不会添加 Claude Code hook，也不会注入 prompt。它只改 API base URL，让 Claude Code 的请求经过本机代理。
 
@@ -85,3 +94,4 @@ curl http://127.0.0.1:17861/__health
 - shim 不记录请求体
 - shim 不修改非 JSON 请求
 - 默认只改写模型名匹配 `minimax` 的请求
+- 对命中 goal/evaluator 规则的请求默认保留 `system`
