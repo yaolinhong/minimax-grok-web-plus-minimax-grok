@@ -151,6 +151,81 @@ function Resolve-SettingsFile {
   return $appDataCandidate
 }
 
+function Resolve-SettingsFiles {
+  $appDataCandidate = [System.IO.Path]::Combine($env:APPDATA, 'Claude', 'settings.json')
+  $userCandidate = [System.IO.Path]::Combine($env:USERPROFILE, '.claude', 'settings.json')
+  $files = New-Object System.Collections.Generic.List[string]
+
+  $files.Add($userCandidate)
+  if ($appDataCandidate -ne $userCandidate) {
+    $files.Add($appDataCandidate)
+  }
+
+  return $files.ToArray()
+}
+
+function Set-ShimSettings {
+  param(
+    [string]$SettingsFile,
+    [hashtable]$ShimEnv,
+    [string[]]$ManagedEnvKeys
+  )
+
+  New-Item -ItemType Directory -Path (Split-Path -Parent $SettingsFile) -Force | Out-Null
+
+  $settings = @{}
+  $backupFile = $null
+  if (Test-Path -LiteralPath $SettingsFile) {
+    $settingsObject = Read-JsonFile -Path $SettingsFile
+    if ($null -ne $settingsObject) {
+      $settings = $settingsObject
+    }
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $backupFile = $SettingsFile + '.system-user-shim.' + $timestamp + '.bak'
+    Copy-Item -LiteralPath $SettingsFile -Destination $backupFile -Force
+  }
+
+  if (-not $settings) {
+    $settings = @{}
+  }
+
+  $envMap = @{}
+  if ($settings.PSObject.Properties.Match('env').Count -gt 0 -and $settings.env -ne $null) {
+    foreach ($property in $settings.env.PSObject.Properties) {
+      $envMap[$property.Name] = [string]$property.Value
+    }
+  }
+
+  foreach ($key in $ShimEnv.Keys) {
+    if (
+      ($key -eq 'ANTHROPIC_SMALL_FAST_MODEL' -or $key -eq 'ANTHROPIC_DEFAULT_HAIKU_MODEL') -and
+      $envMap.ContainsKey($key) -and
+      -not [string]::IsNullOrWhiteSpace($envMap[$key])
+    ) {
+      continue
+    }
+    $envMap[$key] = [string]$ShimEnv[$key]
+  }
+
+  $envObject = New-Object psobject
+  foreach ($key in ($envMap.Keys | Sort-Object)) {
+    Add-Member -InputObject $envObject -MemberType NoteProperty -Name $key -Value $envMap[$key]
+  }
+
+  if ($settings -is [System.Collections.IDictionary]) {
+    $settings['env'] = $envObject
+  } else {
+    if ($settings.PSObject.Properties.Match('env').Count -gt 0) {
+      $settings.env = $envObject
+    } else {
+      Add-Member -InputObject $settings -MemberType NoteProperty -Name env -Value $envObject
+    }
+  }
+
+  Write-JsonFile -Path $SettingsFile -Object $settings
+  return $backupFile
+}
+
 function Test-ServiceExists {
   param([string]$ServiceName)
 
@@ -300,54 +375,30 @@ $logDir = Join-Path $env:USERPROFILE '.claude\logs'
 $serverDestination = Join-Path $installDir 'server.mjs'
 $logFile = Join-Path $logDir 'system-user-shim.log'
 $stateFile = Join-Path $installDir 'state.json'
-$settingsFile = Resolve-SettingsFile
+$settingsFiles = Resolve-SettingsFiles
 
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-New-Item -ItemType Directory -Path (Split-Path -Parent $settingsFile) -Force | Out-Null
 
 Copy-Item -LiteralPath $sourceServer -Destination $serverDestination -Force
 
-$settings = @{}
-$backupFile = $null
-if (Test-Path -LiteralPath $settingsFile) {
-  $settingsObject = Read-JsonFile -Path $settingsFile
-  if ($null -ne $settingsObject) {
-    $settings = $settingsObject
-  }
-  $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-  $backupFile = $settingsFile + '.system-user-shim.' + $timestamp + '.bak'
-  Copy-Item -LiteralPath $settingsFile -Destination $backupFile -Force
-}
-
-if (-not $settings) {
-  $settings = @{}
-}
-
-$envMap = @{}
-if ($settings.PSObject.Properties.Match('env').Count -gt 0 -and $settings.env -ne $null) {
-  foreach ($property in $settings.env.PSObject.Properties) {
-    $envMap[$property.Name] = [string]$property.Value
-  }
-}
-
-$envMap['ANTHROPIC_BASE_URL'] = 'http://127.0.0.1:' + $port
-$envMap['ANTHROPIC_AUTH_TOKEN'] = $apiKey
-$envMap['SYSTEM_USER_SHIM_TARGET_BASE_URL'] = $targetBaseUrl
-$envMap['SYSTEM_USER_SHIM_MODEL_PATTERN'] = $modelPattern
-$envMap['SYSTEM_USER_SHIM_PRESERVE_SYSTEM'] = $preserveSystem
-$envMap['ANTHROPIC_MODEL'] = $model
-$envMap['ANTHROPIC_DEFAULT_SONNET_MODEL'] = $model
-$envMap['ANTHROPIC_DEFAULT_OPUS_MODEL'] = $model
-if (-not $envMap.ContainsKey('ANTHROPIC_SMALL_FAST_MODEL') -or [string]::IsNullOrWhiteSpace($envMap['ANTHROPIC_SMALL_FAST_MODEL'])) {
-  $envMap['ANTHROPIC_SMALL_FAST_MODEL'] = $model
-}
-if (-not $envMap.ContainsKey('ANTHROPIC_DEFAULT_HAIKU_MODEL') -or [string]::IsNullOrWhiteSpace($envMap['ANTHROPIC_DEFAULT_HAIKU_MODEL'])) {
-  $envMap['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = $envMap['ANTHROPIC_SMALL_FAST_MODEL']
-}
 $defaultRoutes = 'minimax=https://api.minimaxi.com/anthropic'
 $routes = Prompt-Value -Label 'Model routes' -DefaultValue $defaultRoutes
-$envMap['SYSTEM_USER_SHIM_ROUTES'] = $routes
+$shimEnv = @{
+  ANTHROPIC_BASE_URL = 'http://127.0.0.1:' + $port
+  ANTHROPIC_AUTH_TOKEN = $apiKey
+  SYSTEM_USER_SHIM_TARGET_BASE_URL = $targetBaseUrl
+  SYSTEM_USER_SHIM_MODEL_PATTERN = $modelPattern
+  SYSTEM_USER_SHIM_PRESERVE_SYSTEM = $preserveSystem
+  SYSTEM_USER_SHIM_ROUTES = $routes
+  ANTHROPIC_MODEL = $model
+  ANTHROPIC_DEFAULT_SONNET_MODEL = $model
+  ANTHROPIC_DEFAULT_OPUS_MODEL = $model
+  ANTHROPIC_SMALL_FAST_MODEL = $model
+  ANTHROPIC_DEFAULT_HAIKU_MODEL = $model
+  API_TIMEOUT_MS = '3000000'
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+}
 $managedEnvKeys = @(
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_AUTH_TOKEN',
@@ -359,33 +410,22 @@ $managedEnvKeys = @(
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_SMALL_FAST_MODEL',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL'
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'API_TIMEOUT_MS',
+  'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'
 )
-if (-not $envMap.ContainsKey('API_TIMEOUT_MS') -or [string]::IsNullOrWhiteSpace($envMap['API_TIMEOUT_MS'])) {
-  $envMap['API_TIMEOUT_MS'] = '3000000'
-  $managedEnvKeys += 'API_TIMEOUT_MS'
-}
-if (-not $envMap.ContainsKey('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC') -or [string]::IsNullOrWhiteSpace($envMap['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'])) {
-  $envMap['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'] = '1'
-  $managedEnvKeys += 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'
-}
 
-$envObject = New-Object psobject
-foreach ($key in ($envMap.Keys | Sort-Object)) {
-  Add-Member -InputObject $envObject -MemberType NoteProperty -Name $key -Value $envMap[$key]
-}
-
-if ($settings -is [System.Collections.IDictionary]) {
-  $settings['env'] = $envObject
-} else {
-  if ($settings.PSObject.Properties.Match('env').Count -gt 0) {
-    $settings.env = $envObject
-  } else {
-    Add-Member -InputObject $settings -MemberType NoteProperty -Name env -Value $envObject
+$backupFiles = @()
+foreach ($settingsFile in $settingsFiles) {
+  $backup = Set-ShimSettings -SettingsFile $settingsFile -ShimEnv $shimEnv -ManagedEnvKeys $managedEnvKeys
+  if ($backup) {
+    $backupFiles += $backup
   }
 }
-
-Write-JsonFile -Path $settingsFile -Object $settings
+$primaryBackupFile = $null
+if ($backupFiles.Count -gt 0) {
+  $primaryBackupFile = $backupFiles[0]
+}
 
 Remove-ServiceIfPresent -NssmPath $nssmPath -ServiceName $serviceName
 
@@ -424,8 +464,10 @@ try {
 $state = [ordered]@{
   installedAt = (Get-Date).ToString('o')
   serviceName = $serviceName
-  settingsFile = $settingsFile
-  backupFile = $backupFile
+  settingsFile = $settingsFiles[0]
+  settingsFiles = $settingsFiles
+  backupFile = $primaryBackupFile
+  backupFiles = $backupFiles
   installDir = $installDir
   logFile = $logFile
   port = $port
@@ -443,5 +485,5 @@ Invoke-HealthCheck -Port $port -LogFile $logFile
 Write-Info ''
 Write-Info 'Installed.'
 Write-Info ('Health: http://127.0.0.1:' + $port + '/__health')
-Write-Info ('Claude Code settings: ' + $settingsFile)
+Write-Info ('Claude Code settings: ' + ($settingsFiles -join ', '))
 Write-Info ('Service log: ' + $logFile)

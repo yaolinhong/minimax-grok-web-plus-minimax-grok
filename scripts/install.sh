@@ -84,6 +84,33 @@ chmod +x "${install_dir}/server.mjs"
 
 node_path="$(command -v node)"
 
+cat >"${install_dir}/ensure.sh" <<ENSURE
+#!/usr/bin/env bash
+set -euo pipefail
+
+port="\${SYSTEM_USER_SHIM_PORT:-${port}}"
+label="${label}"
+plist="${plist_file}"
+
+if /usr/bin/curl -fsS "http://127.0.0.1:\${port}/__health" >/dev/null 2>&1; then
+  exit 0
+fi
+
+/bin/launchctl bootstrap "gui/\$UID" "\${plist}" >/dev/null 2>&1 || true
+/bin/launchctl kickstart -k "gui/\$UID/\${label}" >/dev/null 2>&1 || true
+
+for _ in {1..30}; do
+  if /usr/bin/curl -fsS "http://127.0.0.1:\${port}/__health" >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 0.1
+done
+
+echo "system-user-shim failed to start on port \${port}" >&2
+exit 1
+ENSURE
+chmod +x "${install_dir}/ensure.sh"
+
 cat >"${plist_file}" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
