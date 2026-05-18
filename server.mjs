@@ -11,6 +11,8 @@ const preserveSystemPatterns = (process.env.SYSTEM_USER_SHIM_PRESERVE_SYSTEM || 
   .map((pattern) => pattern.trim())
   .filter(Boolean)
   .map((pattern) => new RegExp(pattern, "i"));
+const maxBodySize = Number(process.env.SYSTEM_USER_SHIM_MAX_BODY_SIZE || 10 * 1024 * 1024);
+const isProduction = process.env.NODE_ENV === "production";
 const unsupportedTopLevelKeys = [
   "container",
   "context_management",
@@ -577,11 +579,48 @@ function copyHeaders(headers, bodyLength) {
   return result;
 }
 
+function safeWriteHead(res, statusCode, headers) {
+  if (res.headersSent || res.destroyed) {
+    return false;
+  }
+  res.writeHead(statusCode, headers);
+  return true;
+}
+
+function readRequest(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let received = 0;
+    req.on("data", (chunk) => {
+      received += chunk.length;
+      if (received > maxBodySize) {
+        reject(new Error(`Payload Too Large: ${received} bytes exceeds ${maxBodySize} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
 const server = http.createServer(async (req, res) => {
+  let upstreamReq = null;
+
+  function abortUpstream() {
+    if (upstreamReq && !upstreamReq.destroyed) {
+      upstreamReq.destroy();
+    }
+  }
+  req.on("close", abortUpstream);
+  res.on("close", abortUpstream);
+
   try {
     if (req.url === "/__health") {
-      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-      res.end("ok");
+      if (safeWriteHead(res, 200, { "content-type": "text/plain; charset=utf-8" })) {
+        res.end("ok");
+      }
       return;
     }
 
@@ -592,7 +631,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== "GET" && rawBody.length > 0) {
       const contentType = String(req.headers["content-type"] || "");
       if (contentType.includes("application/json")) {
-        const parsed = JSON.parse(rawBody.toString("utf8"));
+        let parsed;
+        try {
+          parsed = JSON.parse(rawBody.toString("utf8"));
+        } catch (parseErr) {
+          const parseMessage = parseErr instanceof Error ? parseErr.message : String(parseErr);
+          if (safeWriteHead(res, 400, { "content-type": "application/json; charset=utf-8" })) {
+            res.end(JSON.stringify({ error: "Invalid JSON in request body", message: parseMessage }));
+          }
+          return;
+        }
         const isStopHookEvaluator = isStopHookEvaluatorRequest(parsed);
         const sanitized = sanitizeRequestBody(parsed);
         const rewritten = convertSystemToUser(sanitized);
@@ -607,7 +655,7 @@ const server = http.createServer(async (req, res) => {
     const targetUrl = new URL(targetPath, targetBase);
 
     const client = targetUrl.protocol === "https:" ? https : http;
-    const upstreamReq = client.request(
+    upstreamReq = client.request(
       targetUrl,
       {
         method: req.method,
@@ -615,8 +663,9 @@ const server = http.createServer(async (req, res) => {
       },
       (upstreamRes) => {
         if (!normalizeEvaluatorResponse) {
-          res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
-          upstreamRes.pipe(res);
+          if (safeWriteHead(res, upstreamRes.statusCode || 502, upstreamRes.headers)) {
+            upstreamRes.pipe(res);
+          }
           return;
         }
 
@@ -627,11 +676,14 @@ const server = http.createServer(async (req, res) => {
     );
 
     upstreamReq.on("error", (error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!res.headersSent) {
-        res.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+      const internalMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[SHIM] upstream error: ${internalMessage}`);
+      const clientMessage = isProduction
+        ? "Bad Gateway"
+        : `system-user-shim upstream failed: ${internalMessage}`;
+      if (safeWriteHead(res, 502, { "content-type": "application/json; charset=utf-8" })) {
+        res.end(JSON.stringify({ error: clientMessage }));
       }
-      res.end(JSON.stringify({ error: "system-user-shim upstream failed", message }));
     });
 
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -639,9 +691,18 @@ const server = http.createServer(async (req, res) => {
     }
     upstreamReq.end();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    res.writeHead(502, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ error: "system-user-shim failed", message }));
+    const internalMessage = error instanceof Error ? error.message : String(error);
+    console.error(`[SHIM] handler error: ${internalMessage}`);
+
+    const isPayloadTooLarge = internalMessage.includes("Payload Too Large");
+    const statusCode = isPayloadTooLarge ? 413 : 502;
+    const clientMessage = isProduction
+      ? isPayloadTooLarge ? "Payload Too Large" : "Internal Server Error"
+      : `system-user-shim failed: ${internalMessage}`;
+
+    if (safeWriteHead(res, statusCode, { "content-type": "application/json; charset=utf-8" })) {
+      res.end(JSON.stringify({ error: clientMessage }));
+    }
   }
 });
 
