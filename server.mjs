@@ -21,14 +21,16 @@ const unsupportedTopLevelKeys = [
 ];
 const stopHookJsonInstruction = [
   "You are evaluating whether a Claude Code stop condition is satisfied.",
-  "Use only the transcript evidence provided below.",
-  "Do not explain your reasoning before the JSON.",
+  "Use only the concise evidence below.",
+  "Return JSON only.",
   "Return exactly one JSON object and no other text.",
   "Schema: {\"ok\": boolean, \"reason\": string}",
-  "Keep reason concise, under 80 words.",
+  "Keep reason under 30 words.",
   "Use ok=true only when the evidence shows the condition has already been satisfied.",
   "Use ok=false when the evidence is missing, ambiguous, or only says work will start.",
 ].join("\n");
+const evaluatorCache = new Map();
+const evaluatorCacheTtlMs = Number(process.env.SYSTEM_USER_SHIM_EVALUATOR_CACHE_TTL_MS || 60000);
 
 if (!targetBaseUrl) {
   console.error("SYSTEM_USER_SHIM_TARGET_BASE_URL is required");
@@ -284,16 +286,33 @@ function truncateMiddle(text, maxLength) {
   return `${value.slice(0, headLength)}\n\n...[truncated ${value.length - maxLength} chars]...\n\n${value.slice(-tailLength)}`;
 }
 
+function hashText(text) {
+  let hash = 2166136261;
+  const value = String(text || "");
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function sliceAfterLastGoalMarker(lines) {
+  const markerIndex = lines.findLastIndex((line) => /Goal set:|A session-scoped Stop hook is now active|目标已设置|目标：/i.test(line));
+  if (markerIndex === -1) {
+    return lines;
+  }
+  return lines.slice(markerIndex);
+}
+
 function compactTranscriptEvidence(evidenceText) {
   const text = String(evidenceText || "");
-  const lines = text.split("\n");
+  const lines = sliceAfterLastGoalMarker(text.split("\n"));
   const importantPattern =
     /goal|condition|完成|最终|证据|交付|需求|状态|已创建|已实现|已包含|已集成|已验证|可运行|正常工作|clean|nothing to commit|working tree|git |commit|README|readme|src\/|examples\/|package\.json|\.gitignore|skill|技术博客写作|git-commit|tool_use|tool_result|Bash|Write|Update|Read|mkdir|npm|publish|自动化|公众号|微信|仓库|脚本|CLI|api\.js|cli\.js/i;
   const important = lines.filter((line) => importantPattern.test(line));
-  const head = lines.slice(0, 40);
-  const tail = lines.slice(-180);
-  const joined = [...head, "", "[important transcript lines]", ...important.slice(-260), "", "[recent transcript tail]", ...tail].join("\n");
-  return truncateMiddle(joined, 12000);
+  const tail = lines.slice(-80);
+  const joined = ["[important recent lines]", ...important.slice(-80), "", "[recent transcript tail]", ...tail].join("\n");
+  return truncateMiddle(joined, 4000);
 }
 
 function compactStopHookEvaluatorRequest(body) {
@@ -314,7 +333,7 @@ function compactStopHookEvaluatorRequest(body) {
   ].join("\n");
 
   const compacted = { ...body };
-  compacted.max_tokens = Math.min(Math.max(Number(body.max_tokens || 1024) || 1024, 512), 2048);
+  compacted.max_tokens = Math.min(Math.max(Number(body.max_tokens || 192) || 192, 64), 192);
   compacted.stream = false;
   compacted.temperature = 0;
   compacted.messages = [
@@ -431,7 +450,44 @@ function normalizeEvaluatorMessageBody(rawBody) {
   return Buffer.from(JSON.stringify({ ...parsed, content: [{ type: "text", text: JSON.stringify(normalized) }] }), "utf8");
 }
 
-function proxyResponse(upstreamRes, res, responseBody, normalizeEvaluatorResponse) {
+function getEvaluatorCacheKey(body) {
+  const { condition, lastAssistantMessage, evidenceText } = extractStopHookEvaluatorParts(body);
+  return [condition, hashText(lastAssistantMessage), hashText(compactTranscriptEvidence(evidenceText || lastAssistantMessage))].join(":");
+}
+
+function pruneEvaluatorCache(now) {
+  for (const [key, value] of evaluatorCache.entries()) {
+    if (value.expiresAt <= now) {
+      evaluatorCache.delete(key);
+    }
+  }
+}
+
+function getCachedEvaluatorResponse(cacheKey) {
+  if (!cacheKey || evaluatorCacheTtlMs <= 0) {
+    return undefined;
+  }
+  const now = Date.now();
+  pruneEvaluatorCache(now);
+  const cached = evaluatorCache.get(cacheKey);
+  if (!cached || cached.expiresAt <= now) {
+    evaluatorCache.delete(cacheKey);
+    return undefined;
+  }
+  return Buffer.from(cached.body);
+}
+
+function setCachedEvaluatorResponse(cacheKey, body) {
+  if (!cacheKey || evaluatorCacheTtlMs <= 0) {
+    return;
+  }
+  evaluatorCache.set(cacheKey, {
+    body: Buffer.from(body),
+    expiresAt: Date.now() + evaluatorCacheTtlMs,
+  });
+}
+
+function proxyResponse(upstreamRes, res, responseBody, normalizeEvaluatorResponse, evaluatorCacheKey) {
   if (!normalizeEvaluatorResponse || !String(upstreamRes.headers["content-type"] || "").includes("application/json")) {
     res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
     res.end(responseBody);
@@ -440,6 +496,7 @@ function proxyResponse(upstreamRes, res, responseBody, normalizeEvaluatorRespons
 
   try {
     const normalizedBody = normalizeEvaluatorMessageBody(responseBody);
+    setCachedEvaluatorResponse(evaluatorCacheKey, normalizedBody);
     res.writeHead(upstreamRes.statusCode || 502, copyHeaders(upstreamRes.headers, normalizedBody.length));
     res.end(normalizedBody);
   } catch {
@@ -588,12 +645,22 @@ const server = http.createServer(async (req, res) => {
     const rawBody = await readRequest(req);
     let bodyBuffer = rawBody;
     let normalizeEvaluatorResponse = false;
+    let evaluatorCacheKey;
 
     if (req.method !== "GET" && rawBody.length > 0) {
       const contentType = String(req.headers["content-type"] || "");
       if (contentType.includes("application/json")) {
         const parsed = JSON.parse(rawBody.toString("utf8"));
         const isStopHookEvaluator = isStopHookEvaluatorRequest(parsed);
+        if (isStopHookEvaluator) {
+          evaluatorCacheKey = getEvaluatorCacheKey(parsed);
+          const cachedResponse = getCachedEvaluatorResponse(evaluatorCacheKey);
+          if (cachedResponse) {
+            res.writeHead(200, { "content-type": "application/json; charset=utf-8", "content-length": String(cachedResponse.length) });
+            res.end(cachedResponse);
+            return;
+          }
+        }
         const sanitized = sanitizeRequestBody(parsed);
         const rewritten = convertSystemToUser(sanitized);
         logRequestSummary(parsed, rewritten);
@@ -622,7 +689,7 @@ const server = http.createServer(async (req, res) => {
 
         const chunks = [];
         upstreamRes.on("data", (chunk) => chunks.push(chunk));
-        upstreamRes.on("end", () => proxyResponse(upstreamRes, res, Buffer.concat(chunks), normalizeEvaluatorResponse));
+        upstreamRes.on("end", () => proxyResponse(upstreamRes, res, Buffer.concat(chunks), normalizeEvaluatorResponse, evaluatorCacheKey));
       },
     );
 
