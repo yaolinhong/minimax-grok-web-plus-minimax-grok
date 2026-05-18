@@ -154,9 +154,7 @@ $serviceName = $defaultServiceName
 $installDir = $defaultInstallDir
 $logFile = $defaultLogFile
 $settingsFile = Resolve-SettingsFile
-$settingsFiles = @($settingsFile)
 $backupFile = $null
-$backupFiles = @()
 $managedEnvKeys = @()
 
 if ($null -ne $state) {
@@ -171,18 +169,9 @@ if ($null -ne $state) {
   }
   if ($state.PSObject.Properties.Match('settingsFile').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$state.settingsFile)) {
     $settingsFile = [string]$state.settingsFile
-    $settingsFiles = @($settingsFile)
-  }
-  if ($state.PSObject.Properties.Match('settingsFiles').Count -gt 0 -and $state.settingsFiles -ne $null) {
-    $settingsFiles = @($state.settingsFiles)
   }
   if ($state.PSObject.Properties.Match('backupFile').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$state.backupFile)) {
     $backupFile = [string]$state.backupFile
-  }
-  if ($state.PSObject.Properties.Match('backupFiles').Count -gt 0 -and $state.backupFiles -ne $null) {
-    $backupFiles = @($state.backupFiles)
-  } elseif ($backupFile) {
-    $backupFiles = @($backupFile)
   }
   if ($state.PSObject.Properties.Match('managedEnvKeys').Count -gt 0 -and $state.managedEnvKeys -ne $null) {
     $managedEnvKeys = @($state.managedEnvKeys)
@@ -216,36 +205,25 @@ if (Test-ServiceExists -ServiceName $serviceName) {
 }
 
 $restoreBackup = $false
-$restorableBackups = @($backupFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
-if ($restorableBackups.Count -gt 0) {
-  $answer = Read-Host -Prompt ('Restore Claude settings backups? This will overwrite changes made to settings.json after installation. [y/N]')
+if ($backupFile -and (Test-Path -LiteralPath $backupFile)) {
+  $answer = Read-Host -Prompt ('Restore Claude settings backup from "' + $backupFile + '"? This will overwrite changes made to settings.json after installation. [y/N]')
   if ($answer -match '^[Yy]') {
     $restoreBackup = $true
   }
 }
 
 if ($restoreBackup) {
-  foreach ($backup in $restorableBackups) {
-    $target = $backup -replace '\.system-user-shim\.[0-9]{8}-[0-9]{6}\.bak$', ''
-    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
-    Copy-Item -LiteralPath $backup -Destination $target -Force
-    Write-Info ('Restored Claude Code settings from ' + $backup)
-  }
+  New-Item -ItemType Directory -Path (Split-Path -Parent $settingsFile) -Force | Out-Null
+  Copy-Item -LiteralPath $backupFile -Destination $settingsFile -Force
+  Write-Info ('Restored Claude Code settings from ' + $backupFile)
 } else {
-  $cleanedAny = $false
-  foreach ($file in $settingsFiles) {
-    $cleaned = Remove-ShimEnvFromSettings -SettingsFile $file -ManagedEnvKeys $managedEnvKeys
-    if ($cleaned) {
-      $cleanedAny = $true
-      Write-Info ('Removed shim-related environment variables from ' + $file)
-    }
-  }
-  if (-not $cleanedAny) {
-    if ($restorableBackups.Count -gt 0) {
-      Write-Info ('Skipped backup restore. Backups remain at ' + ($restorableBackups -join ', '))
-    } else {
-      Write-Info 'No settings backup found. No shim-specific settings were removed.'
-    }
+  $cleaned = Remove-ShimEnvFromSettings -SettingsFile $settingsFile -ManagedEnvKeys $managedEnvKeys
+  if ($cleaned) {
+    Write-Info ('Removed shim-related environment variables from ' + $settingsFile)
+  } elseif ($backupFile -and (Test-Path -LiteralPath $backupFile)) {
+    Write-Info ('Skipped backup restore. Backup remains at ' + $backupFile)
+  } else {
+    Write-Info 'No settings backup found. No shim-specific settings were removed.'
   }
 }
 

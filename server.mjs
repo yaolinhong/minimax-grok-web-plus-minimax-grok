@@ -200,25 +200,10 @@ function isStopHookEvaluatorRequest(body) {
   const systemText = flattenContentToText(body?.system);
   const messagesText = flattenMessagesToText(body?.messages);
   const text = `${systemText}\n${messagesText}`;
-  const args = extractStopHookArguments(text);
-  const hasStopHookArgs =
-    /hook_event_name/i.test(text) &&
-    /Stop/i.test(String(args?.hook_event_name || text)) &&
-    (/last_assistant_message/i.test(text) || /transcript_path/i.test(text) || /stop_hook_active/i.test(text));
-  const hasGoalStopPrompt =
-    /stopping condition/i.test(text) &&
-    (/satisfied/i.test(text) || /met/i.test(text) || /achieved/i.test(text) || /fulfilled/i.test(text)) &&
-    (/transcript/i.test(text) || /conversation/i.test(text) || /last_assistant_message/i.test(text));
-
   return (
     /Based on the conversation transcript above, has the following stopping condition been satisfied\?/i.test(text) ||
-    hasStopHookArgs ||
-    hasGoalStopPrompt
+    (/hook_event_name["']?\s*:\s*["']?Stop/i.test(text) && /last_assistant_message/i.test(text))
   );
-}
-
-function extractStopHookArguments(text) {
-  return extractJsonObjectAfterMarker(text, "ARGUMENTS:") || extractJsonObjectAfterMarker(text, "Arguments:") || extractJsonObjectAfterMarker(text, "arguments:");
 }
 
 function extractJsonObjectAfterMarker(text, marker) {
@@ -279,7 +264,7 @@ function extractStopHookEvaluatorParts(body) {
   const evidenceMessages = hookMessageIndex === -1 ? messages : messages.slice(0, hookMessageIndex);
   const conditionMatches = [...text.matchAll(/^Condition:\s*([^\n]+)/gim)];
   const conditionMatch = conditionMatches.at(-1);
-  const args = extractStopHookArguments(text);
+  const args = extractJsonObjectAfterMarker(text, "ARGUMENTS:");
   return {
     condition: String(conditionMatch?.[1] || "").trim(),
     lastAssistantMessage: typeof args?.last_assistant_message === "string" ? args.last_assistant_message : "",
@@ -603,7 +588,6 @@ const server = http.createServer(async (req, res) => {
     const rawBody = await readRequest(req);
     let bodyBuffer = rawBody;
     let normalizeEvaluatorResponse = false;
-    let routeAsMessagesRequest = false;
 
     if (req.method !== "GET" && rawBody.length > 0) {
       const contentType = String(req.headers["content-type"] || "");
@@ -614,14 +598,12 @@ const server = http.createServer(async (req, res) => {
         const rewritten = convertSystemToUser(sanitized);
         logRequestSummary(parsed, rewritten);
         normalizeEvaluatorResponse = isStopHookEvaluator;
-        routeAsMessagesRequest = isStopHookEvaluator;
         bodyBuffer = Buffer.from(JSON.stringify(rewritten), "utf8");
       }
     }
 
     const targetBase = targetBaseUrl.endsWith("/") ? targetBaseUrl : `${targetBaseUrl}/`;
-    const requestPath = routeAsMessagesRequest ? "/v1/messages" : String(req.url || "/");
-    const targetPath = requestPath.replace(/^\/+/, "");
+    const targetPath = String(req.url || "/").replace(/^\/+/, "");
     const targetUrl = new URL(targetPath, targetBase);
 
     const client = targetUrl.protocol === "https:" ? https : http;
