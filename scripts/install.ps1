@@ -345,12 +345,16 @@ if (-not $envMap.ContainsKey('ANTHROPIC_SMALL_FAST_MODEL') -or [string]::IsNullO
 if (-not $envMap.ContainsKey('ANTHROPIC_DEFAULT_HAIKU_MODEL') -or [string]::IsNullOrWhiteSpace($envMap['ANTHROPIC_DEFAULT_HAIKU_MODEL'])) {
   $envMap['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = $envMap['ANTHROPIC_SMALL_FAST_MODEL']
 }
+$defaultRoutes = 'minimax=https://api.minimaxi.com/anthropic'
+$routes = Prompt-Value -Label 'Model routes' -DefaultValue $defaultRoutes
+$envMap['SYSTEM_USER_SHIM_ROUTES'] = $routes
 $managedEnvKeys = @(
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_AUTH_TOKEN',
   'SYSTEM_USER_SHIM_TARGET_BASE_URL',
   'SYSTEM_USER_SHIM_MODEL_PATTERN',
   'SYSTEM_USER_SHIM_PRESERVE_SYSTEM',
+  'SYSTEM_USER_SHIM_ROUTES',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
@@ -404,7 +408,8 @@ $environmentLines = @(
   'SYSTEM_USER_SHIM_PORT=' + $port,
   'SYSTEM_USER_SHIM_TARGET_BASE_URL=' + $targetBaseUrl,
   'SYSTEM_USER_SHIM_MODEL_PATTERN=' + $modelPattern,
-  'SYSTEM_USER_SHIM_PRESERVE_SYSTEM=' + $preserveSystem
+  'SYSTEM_USER_SHIM_PRESERVE_SYSTEM=' + $preserveSystem,
+  'SYSTEM_USER_SHIM_ROUTES=' + $routes
 )
 $parametersKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\' + $serviceName + '\Parameters'
 if (-not (Test-Path -LiteralPath $parametersKey)) {
